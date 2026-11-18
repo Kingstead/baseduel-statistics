@@ -2,8 +2,8 @@
 // scoreboard_items, neobot_items, highlight_lines, _marker_key), so a board
 // here and !bdmatch in game show the same numbers. Pure: rows in, cells out.
 
-import type { NeobotLineRow, NeobotPlayerRow, PlayerRow, RoundRow } from "./data";
-import { duration, pyFixed, pySum, rating, timeShare } from "./format";
+import type { NeobotLineRow, NeobotPlayerRow, PlayerRow, ReplayHighlight, ReplayMoment, RoundRow } from "./data";
+import { duration, fold, pyFixed, pySum, rating, timeShare } from "./format";
 
 // The bots' columns. Kills and deaths are K and D: players read the league
 // board's W and L as wins and losses (the pub bot renamed them 2026-10-22),
@@ -67,6 +67,32 @@ export interface BoardGroup {
   verdict: "Winner" | "Loser" | null;
   rows: BoardRow[];
   team: BoardRow | null;
+}
+
+export type BoardSortDirection = "ascending" | "descending";
+
+function boardSortValue(cell: Cell): number | null {
+  if (cell === "-") return null;
+  if (typeof cell === "number") return cell;
+  const time = /^(\d+):(\d{2}) \(\d+%\)$/.exec(cell);
+  if (time) return Number(time[1]) * 60 + Number(time[2]);
+  const value = Number(cell);
+  if (cell.trim() === "" || !Number.isFinite(value)) throw new Error(`Unsortable scoreboard value: ${cell}`);
+  return value;
+}
+
+/** Column -1 is Player. Time sorts by elapsed seconds, not its percentage;
+ * untracked cells stay last in either direction. */
+export function sortBoardRows(rows: BoardRow[], column: number, direction: BoardSortDirection): BoardRow[] {
+  const sign = direction === "ascending" ? 1 : -1;
+  return [...rows].sort((a, b) => {
+    const names = cmp(fold(a.name), fold(b.name));
+    if (column === -1) return sign * names;
+    const av = boardSortValue(a.cells[column]), bv = boardSortValue(b.cells[column]);
+    if (av == null && bv != null) return 1;
+    if (av != null && bv == null) return -1;
+    return sign * ((av ?? 0) - (bv ?? 0)) || names;
+  });
 }
 
 const n = (v: number | null | undefined) => v || 0;
@@ -207,16 +233,41 @@ export function neobotBoard(lines: NeobotLineRow[], players: NeobotPlayerRow[],
   });
 }
 
-export interface Highlight {
-  label: string;
-  names: string[];
-  more: number;
-  value: string;
+export const HIGHLIGHT_GROUPS = ["Score & time", "Kills", "Deaths", "Damage", "Teamwork", "Items", "Movement"] as const;
+export type HighlightGroup = typeof HIGHLIGHT_GROUPS[number];
+
+export interface Highlight extends Omit<ReplayHighlight, "group"> {
+  group: HighlightGroup;
 }
 
 const HIGHLIGHT_MAX_NAMES = 3;
 
-type Rec = Partial<Record<string, number | string | null>> & { player_name: string };
+export function highlightLeaders<T extends { player_name: string }>(
+  group: HighlightGroup, label: string, records: T[], value: (r: T) => number | null,
+  show: (v: number) => string = String, includeNonPositive = false,
+): Highlight | null {
+  if (!records.length) return null;
+  const scores = records.map((r) => ({ name: r.player_name, raw: value(r) }));
+  const best = Math.max(...scores.map((r) => r.raw ?? 0));
+  if (!includeNonPositive && best <= 0) return null;
+  const disp = show(best);
+  const leaders = scores.filter((r) => show(r.raw ?? 0) === disp).map((r) => r.name)
+    .sort((a, b) => cmp(a.toLowerCase(), b.toLowerCase()));
+  const ranking = scores.sort((a, b) => {
+    if (a.raw == null && b.raw != null) return 1;
+    if (a.raw != null && b.raw == null) return -1;
+    return (b.raw ?? 0) - (a.raw ?? 0) || cmp(a.name.toLowerCase(), b.name.toLowerCase());
+  }).map((r) => ({ name: r.name, value: r.raw == null ? null : show(r.raw) }));
+  return {
+    group, label, value: disp,
+    names: leaders.slice(0, HIGHLIGHT_MAX_NAMES),
+    more: Math.max(0, leaders.length - HIGHLIGHT_MAX_NAMES),
+    ranking,
+  };
+}
+
+type HighlightField = Exclude<keyof PlayerRow, "player_name" | "team" | "exit_kind">;
+export type HighlightRecord = { player_name: string } & Partial<Record<HighlightField, number | null>>;
 
 function fmtTime(secs: number): string {
   const s = Math.floor(Math.max(0, secs));
@@ -225,39 +276,37 @@ function fmtTime(secs: number): string {
 }
 
 /** highlight_lines: the leader in each category; a tie shares the line. */
-export function highlights(records: Rec[]): Highlight[] {
+export function highlights(records: HighlightRecord[], streakEnds?: Record<string, ReplayMoment[]>): Highlight[] {
   if (!records.length) return [];
-  const col = (key: string) => (r: Rec) => Number(r[key] || 0);
-  const cats: [string, (r: Rec) => number, (v: number) => string][] = [
-    ["Highest rated", (r) => rating(Number(r.kills || 0), Number(r.teamkills || 0), Number(r.deaths || 0)), (v) => pyFixed(v, 2)],
-    ["Most kills", col("kills"), String],
-    ["Most deaths", col("deaths"), String],
-    ["Most team kills", col("teamkills"), String],
-    ["Best kill streak", col("best_streak"), String],
-    ["Most kill streaks", col("streaks"), String],
-    ["Most streaks ended", col("streak_ends"), String],
-    ["Most safe touches", col("safe_touches"), String],
-    ["Most damage given", col("dmg_given"), String],
-    ["Most damage taken", col("dmg_taken"), String],
-    ["Most attaches", col("attaches"), String],
-    ["Most attached to", col("attached_to"), String],
-    ["Most repels fired", col("reps"), String],
-    ["Most bursts fired", col("bursts"), String],
-    ["Highest bounty", col("max_bounty"), String],
-    ["Most field time", col("active_time"), fmtTime],
+  const col = (key: HighlightField) => (r: HighlightRecord) => r[key] ?? null;
+  const cats: [HighlightGroup, string, (r: HighlightRecord) => number | null, (v: number) => string][] = [
+    ["Score & time", "Highest rated", (r) => rating(Number(r.kills || 0), Number(r.teamkills || 0), Number(r.deaths || 0)), (v) => pyFixed(v, 2)],
+    ["Kills", "Most kills", col("kills"), String],
+    ["Deaths", "Most deaths", col("deaths"), String],
+    ["Kills", "Most team kills", col("teamkills"), String],
+    ["Kills", "Best kill streak", col("best_streak"), String],
+    ["Kills", "Most kill streaks", col("streaks"), String],
+    ["Kills", "Most streaks ended", col("streak_ends"), String],
+    ["Score & time", "Most safe touches", col("safe_touches"), String],
+    ["Damage", "Most damage given", col("dmg_given"), String],
+    ["Damage", "Most damage taken", col("dmg_taken"), String],
+    ["Teamwork", "Most attaches", col("attaches"), String],
+    ["Teamwork", "Most attached to", col("attached_to"), String],
+    ["Items", "Most repels fired", col("reps"), String],
+    ["Items", "Most bursts fired", col("bursts"), String],
+    ["Score & time", "Highest bounty", col("max_bounty"), String],
+    ["Score & time", "Most field time", col("active_time"), fmtTime],
   ];
   const out: Highlight[] = [];
-  for (const [label, value, show] of cats) {
-    const best = Math.max(...records.map(value));
-    if (label !== "Highest rated" && best <= 0) continue;
-    const disp = show(best);
-    const leaders = records.filter((r) => show(value(r)) === disp).map((r) => r.player_name)
-      .sort((a, b) => cmp(a.toLowerCase(), b.toLowerCase()));
-    out.push({
-      label, value: disp,
-      names: leaders.slice(0, HIGHLIGHT_MAX_NAMES),
-      more: Math.max(0, leaders.length - HIGHLIGHT_MAX_NAMES),
-    });
+  for (const [group, label, value, show] of cats) {
+    const h = highlightLeaders(group, label, records, value, show, label === "Highest rated");
+    if (h && label === "Most streaks ended" && streakEnds) {
+      h.ranking = h.ranking.map((r) => ({ ...r, moments: streakEnds[fold(r.name)] }));
+      h.description = "Values are the bot's scoreboard totals. Replay links show reconstructed enemy " +
+        "streaks of 10+ ended during the whole recording and may not match those totals. " +
+        "Each link starts 5 seconds before the ending kill and follows the player who ended the streak.";
+    }
+    if (h) out.push(h);
   }
   return out;
 }

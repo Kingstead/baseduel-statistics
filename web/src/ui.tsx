@@ -1,7 +1,7 @@
 // Small pieces every page uses.
 
 import type { ComponentChildren } from "preact";
-import { useEffect, useMemo, useRef, useState } from "preact/hooks";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { getPlayers, type PlayerIndexRow } from "./data";
 import { fold } from "./format";
 import { navigate, playerHref } from "./router";
@@ -25,6 +25,35 @@ export function Loading({ what = "Loading" }: { what?: string }) {
 
 export function Problem({ error }: { error: Error }) {
   return <p class="problem">Something went wrong loading this page: {error.message}</p>;
+}
+
+export function Modal({ title, children, onClose }: {
+  title: ComponentChildren; children: ComponentChildren; onClose: () => void;
+}) {
+  const ref = useRef<HTMLDialogElement>(null);
+  const titleId = useId();
+  useLayoutEffect(() => {
+    const d = ref.current;
+    if (!d) return;
+    d.addEventListener("close", onClose);
+    d.showModal();
+    return () => {
+      d.removeEventListener("close", onClose);
+      if (d.open) d.close();
+    };
+  }, [onClose]);
+  return (
+    <dialog ref={ref} class="vs-modal" aria-labelledby={titleId}
+            onClick={(e) => { if (e.target === ref.current) onClose(); }}>
+      <div class="vs-body">
+        <header class="vs-head">
+          <h2 id={titleId}>{title}</h2>
+          <button class="vs-close" onClick={onClose} aria-label="Close">×</button>
+        </header>
+        {children}
+      </div>
+    </dialog>
+  );
 }
 
 export function useTitle(title: string) {

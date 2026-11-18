@@ -165,11 +165,12 @@ CAREER_COLS = CAREER_KEYS + ("player_name", "last_team", "last_match_id",
                              "neobot_matches")
 
 
-def control_doc(match_id, doc, rounds):
+def control_doc(match_id, doc, rounds, players=()):
     """A league match's base control, from web/tools/control.mjs's file for
     its replay: per round (by seq, never round_no), freq 0's Held percent as
     the replay's dashboard shows it and its share once a second. Only rounds
-    of this match in bd_rounds; None when the match has none."""
+    of this match in bd_rounds, plus optional cloak-run highlights; None
+    when the match has no joined rounds."""
     if not doc:
         return None
     seqs = {r["seq"] for r in rounds}
@@ -183,7 +184,110 @@ def control_doc(match_id, doc, rounds):
             continue
         out.append({"seq": r["seq"], "held": r["pct"],
                     "shares": r["shares"]})
-    return {"rounds": out} if out else None
+    result = {"rounds": out} if out else None
+    if result is not None:
+        highlights = [highlight for highlight in (
+            cloak_highlight(doc, seqs, players),
+            cloak_totals_highlight(doc, seqs, players),
+        ) if highlight]
+        if highlights:
+            result["highlights"] = highlights
+    return result
+
+
+def cloak_highlight(doc, seqs, players):
+    """Replay-only corridor progress; only rounds joined to this match."""
+    tracked = {fold(name) for name in doc.get("cloakPlayers", ())}
+    best = {}
+    for run in doc.get("cloak", ()):
+        if run["seq"] not in seqs:
+            continue
+        name = fold(run["name"])
+        if name not in best or run["tiles"] > best[name]["tiles"]:
+            best[name] = run
+    scores = []
+    for p in players:
+        name = p["player_name"]
+        run = best.get(fold(name))
+        value = run["tiles"] if run else 0 if fold(name) in tracked else None
+        scores.append((name, value, run))
+    scores.sort(key=lambda row: (row[1] is None, -(row[1] or 0), fold(row[0])))
+    peak = max((value or 0 for _name, value, _run in scores), default=0)
+    if peak <= 0:
+        return None
+    leaders = sorted((name for name, value, _run in scores if value == peak),
+                     key=fold)
+    ranking = []
+    for name, value, run in scores:
+        row = {"name": name, "value": "%s tiles" % value
+               if value is not None else None}
+        if run:
+            row["run"] = {key: run[key] for key in ("start", "end", "seconds")}
+        ranking.append(row)
+    return {
+        "group": "Movement", "label": "Longest cloaked advance",
+        "value": "%s tiles" % peak,
+        "names": leaders[:3], "more": max(0, len(leaders) - 3),
+        "ranking": ranking,
+        "description": (
+            "Net progress toward the enemy safe through the base corridors, "
+            "in map tiles (16 pixels), starting 10 seconds after each round "
+            "begins. Earlier movement and cloaked time do not count. "
+            "Visible forward movement does not count; "
+            "backtracking undoes progress. Shooting reveals of up to 2 seconds "
+            "can join a run. Death, ship/team changes, warps/attaches, leaving "
+            "the base, missing position data and round boundaries reset it. "
+            "A packet-derived estimate, not a bot stat."),
+    }
+
+
+def cloak_totals_highlight(doc, seqs, players):
+    """Total observed cloak time and each separate run's best advance."""
+    if "cloakTotals" not in doc:
+        return None
+    tracked = {fold(name) for name in doc.get("cloakPlayers", ())}
+    totals = {name: {"tiles": 0, "ticks": 0} for name in tracked}
+    for row in doc["cloakTotals"]:
+        name = fold(row["name"])
+        if row["seq"] not in seqs or name not in totals:
+            continue
+        totals[name]["tiles"] += row["tiles"]
+        totals[name]["ticks"] += round(row["seconds"] * 100)
+    scores = [(p["player_name"], totals.get(fold(p["player_name"])))
+              for p in players]
+    scores.sort(key=lambda row: (row[1] is None,
+                                -row[1]["tiles"] if row[1] else 0,
+                                fold(row[0])))
+    peak = max((value["tiles"] for _name, value in scores if value),
+               default=0)
+    if peak <= 0:
+        return None
+    leaders = sorted((name for name, value in scores
+                      if value and value["tiles"] == peak), key=fold)
+    ranking = []
+    for name, total in scores:
+        value = None
+        if total is not None:
+            seconds = total["ticks"] // 100
+            value = "%s tiles / %d:%02d cloaked" % (
+                total["tiles"], seconds // 60, seconds % 60)
+        ranking.append({"name": name, "value": value})
+    return {
+        "group": "Movement", "label": "Total cloaked time & progress",
+        "value": "%s tiles" % peak,
+        "names": leaders[:3], "more": max(0, len(leaders) - 3),
+        "ranking": ranking,
+        "description": (
+            "Ranked by total progress toward the enemy safe, summing each "
+            "separate cloak run's best net advance through the base corridors. "
+            "Backtracking and returning within a run does not earn progress "
+            "again. Time includes all observed cloaked time in the base, even "
+            "while stationary or retreating, not just the best runs. Visible "
+            "shooting gaps add no time or forward progress. Each round's "
+            "first 10 seconds, unmatched rounds and position discontinuities "
+            "are excluded. One tile is 16 pixels; time is minutes:seconds. "
+            "A packet-derived estimate, not a bot stat."),
+    }
 
 
 def chat_doc(doc, rounds):
@@ -204,6 +308,218 @@ def chat_doc(doc, rounds):
             "lines": doc["lines"]}
 
 
+def _rolling_minute_peak(ticks):
+    left = best = 0
+    moment = None
+    for right, tick in enumerate(ticks):
+        while tick - ticks[left] >= 6000:
+            left += 1
+        if right - left + 1 > best:
+            best = right - left + 1
+            moment = (ticks[left], tick)
+    return best, moment
+
+
+def _replay_peaks(kills, name):
+    """The match page's replay highlights, from one player's kill events."""
+    me = fold(name)
+    ordered = sorted(kills, key=lambda k: k["t"])
+    kills_at, deaths_at, live_kills, kill_free_deaths = [], [], [], []
+    kills_without_dying = deaths_without_killing = 0
+    deaths = deaths_before_kill = 0
+    moments = {}
+    enemy_run = []
+    longest = 0
+
+    def peak(key, ticks, best):
+        value, moment = _rolling_minute_peak(ticks)
+        if value > best:
+            moments[key] = moment
+        return max(best, value)
+
+    for k in ordered:
+        killer, killed = fold(k["killer"]), fold(k["killed"])
+        if killer == me and killed != me:
+            kills_at.append(k["t"])
+            live_kills.append(k["t"])
+            deaths_without_killing = peak(
+                "deathsMinuteWithoutKilling", kill_free_deaths,
+                deaths_without_killing)
+            kill_free_deaths = []
+            if not k["teamKill"]:
+                deaths = 0
+                enemy_run.append(k["t"])
+                if len(enemy_run) > longest:
+                    longest = len(enemy_run)
+                    moments["killsBeforeDying"] = (enemy_run[0], k["t"])
+        if killed == me:
+            deaths_at.append(k["t"])
+            kill_free_deaths.append(k["t"])
+            kills_without_dying = peak(
+                "killsMinuteWithoutDying", live_kills, kills_without_dying)
+            live_kills = []
+            enemy_run = []
+            deaths += 1
+            if deaths == 1:
+                death_start = k["t"]
+            if deaths > deaths_before_kill:
+                deaths_before_kill = deaths
+                moments["deathsBeforeKill"] = (death_start, k["t"])
+
+    kills_minute, moments["killsMinute"] = _rolling_minute_peak(kills_at)
+    deaths_minute, moments["deathsMinute"] = _rolling_minute_peak(deaths_at)
+    values = {
+        "killsMinute": kills_minute,
+        "deathsMinute": deaths_minute,
+        "killsBeforeDying": longest,
+        "deathsBeforeKill": deaths_before_kill,
+        "killsMinuteWithoutDying": peak(
+            "killsMinuteWithoutDying", live_kills, kills_without_dying),
+        "deathsMinuteWithoutKilling": peak(
+            "deathsMinuteWithoutKilling", kill_free_deaths,
+            deaths_without_killing),
+    }
+    return values, moments
+
+
+def replay_highlights(kills, players):
+    """The same replay-only highlight rows the match page used to derive."""
+    categories = (
+        ("Kills", "Most kills in a minute", "killsMinute"),
+        ("Kills", "Most enemy kills before dying", "killsBeforeDying"),
+        ("Deaths", "Most deaths in a minute", "deathsMinute"),
+        ("Deaths", "Most deaths before a kill", "deathsBeforeKill"),
+        ("Kills", "Most kills in a minute without dying",
+         "killsMinuteWithoutDying"),
+        ("Deaths", "Most deaths in a minute without killing",
+         "deathsMinuteWithoutKilling"),
+    )
+    peaks = [(p["player_name"], *_replay_peaks(kills, p["player_name"]))
+             for p in players]
+    out = []
+    for group, label, key in categories:
+        scores = [(name, values[key], moments.get(key))
+                  for name, values, moments in peaks]
+        best = max((value for _name, value, _moment in scores), default=0)
+        if best <= 0:
+            continue
+        leaders = sorted((name for name, value, _moment in scores if value == best),
+                         key=str.lower)
+        ranking = []
+        for name, value, moment in sorted(
+                scores, key=lambda row: (-row[1], row[0].lower())):
+            row = {"name": name, "value": str(value)}
+            if moment is not None:
+                row["moments"] = [{"start": max(0, moment[0] - 500),
+                                   "end": moment[1]}]
+            ranking.append(row)
+        out.append({
+            "group": group, "label": label, "value": str(best),
+            "names": leaders[:3], "more": max(0, len(leaders) - 3),
+            "description": (
+                "Replay-derived counts over the whole recording, including "
+                "time between rounds. Minute windows are rolling and exclude "
+                "events exactly 60 seconds apart. Team kills count in minute "
+                "peaks; enemy-kill streaks exclude them, and any death ends "
+                "a streak. Deaths before a kill reset on an enemy kill; "
+                "uninterrupted-minute death runs reset on any kill. "
+                "Watch the first occurrence of each player's best result, "
+                "starting 5 seconds before its first event."),
+            "ranking": ranking,
+        })
+    return out
+
+
+def streak_end_moments(kills):
+    """Every reconstructed enemy streak of 10+ ended, with a 5s lead-in."""
+    active, out = {}, {}
+    for k in sorted(kills, key=lambda k: k["t"]):
+        killer, killed = fold(k["killer"]), fold(k["killed"])
+        count = active.pop(killed, 0)
+        if killer == killed or k["teamKill"]:
+            continue
+        if count >= 10:
+            out.setdefault(killer, []).append({
+                "start": max(0, k["t"] - 500), "end": k["t"],
+                "label": "Ended %s's %s-kill streak" % (k["killed"], count),
+            })
+        active[killer] = active.get(killer, 0) + 1
+    return out
+
+
+def player_kill_breakdown(kills, name):
+    """One player's whole-recording kills by enemy, teammate and weapon."""
+    me = fold(name)
+    buckets = {key: {} for key in ("killed", "killedBy", "teamKilled",
+                                    "teamKilledBy")}
+    out = {"killed": [], "killedBy": [], "teamKilled": [],
+           "teamKilledBy": [], "kills": 0, "deaths": 0,
+           "weaponsOut": {}, "weaponsIn": {}}
+
+    def add(bucket, other, freq, weapon):
+        key = fold(other)
+        item = bucket.get(key)
+        if item is None:
+            item = {"name": other, "freq": freq, "n": 0, "weapons": {}}
+            bucket[key] = item
+        item["n"] += 1
+        item["weapons"][weapon] = item["weapons"].get(weapon, 0) + 1
+
+    for k in kills:
+        gave = fold(k["killer"]) == me
+        took = fold(k["killed"]) == me
+        if gave == took:
+            continue
+        if gave:
+            if k["teamKill"]:
+                add(buckets["teamKilled"], k["killed"], k["killedFreq"],
+                    k["weapon"])
+            else:
+                out["kills"] += 1
+                out["weaponsOut"][k["weapon"]] = \
+                    out["weaponsOut"].get(k["weapon"], 0) + 1
+                add(buckets["killed"], k["killed"], k["killedFreq"],
+                    k["weapon"])
+        elif k["teamKill"]:
+            add(buckets["teamKilledBy"], k["killer"], k["killerFreq"],
+                k["weapon"])
+        else:
+            out["deaths"] += 1
+            out["weaponsIn"][k["weapon"]] = \
+                out["weaponsIn"].get(k["weapon"], 0) + 1
+            add(buckets["killedBy"], k["killer"], k["killerFreq"],
+                k["weapon"])
+
+    for key, bucket in buckets.items():
+        out[key] = sorted(bucket.values(),
+                          key=lambda item: (-item["n"], item["name"].lower()))
+    return out
+
+
+def replay_stats_doc(raw, players):
+    """The useful, compact portion of ss-replay's stats for a match page."""
+    names = {p["player"]: p["name"] for p in raw["players"]}
+    kills = [{
+        "t": k["t"],
+        "killer": names.get(k["killer"], "?"),
+        "killed": names.get(k["killed"], "?"),
+        "weapon": k.get("weapon") or "unknown",
+        "teamKill": k["teamKill"],
+        "killerFreq": k["killerFreq"],
+        "killedFreq": k["killedFreq"],
+    } for k in raw["killLog"]]
+    return {
+        "end": raw["source"]["endTick"],
+        "players": [{"player": p["player"], "name": p["name"],
+                     "shots": p.get("shots", {})} for p in raw["players"]],
+        "kills": kills,
+        "breakdowns": {fold(p["player_name"]): player_kill_breakdown(
+            kills, p["player_name"]) for p in players},
+        "highlights": replay_highlights(kills, players),
+        "streakEnds": streak_end_moments(kills),
+    }
+
+
 def career(c):
     """A career as the site stores it: None for none, else every key, with
     None for anything not tracked."""
@@ -216,7 +532,8 @@ class Section:
     """One bot's database, read once."""
 
     def __init__(self, name, conn, scopes, is_bot, replays=None,
-                 replay_site=None, unfinished=True, control=None, chat=None):
+                 replay_site=None, unfinished=True, control=None, chat=None,
+                 stats_dir=None):
         self.name = name
         self.scopes = scopes
         self.is_bot = is_bot
@@ -267,21 +584,29 @@ class Section:
         self.replay = {}
         self.control = {}
         self.chat = {}
+        self.stats_dir = stats_dir
+        self.stats_replay_id = {}
         if replays is not None:
             for m in self.matches:
                 rid = ("%s-%s" % (m.get("arena"), m.get("recording"))
                        if m.get("recording") else None)
                 if rid and rid.lower() in replays:
+                    replay_id = replays[rid.lower()]
                     self.replay[m["id"]] = "%s/r/%s" % (
-                        replay_site.rstrip("/"), replays[rid.lower()])
+                        replay_site.rstrip("/"), replay_id)
                     got = control_doc(m["id"], (control or {}).get(rid.lower()),
-                                      self.rounds_by_match.get(m["id"], []))
+                                      self.rounds_by_match.get(m["id"], []),
+                                      self.players_by_match.get(m["id"], []))
                     if got:
                         self.control[m["id"]] = got
                     said = chat_doc((chat or {}).get(rid.lower()),
                                     self.rounds_by_match.get(m["id"], []))
                     if said:
                         self.chat[m["id"]] = said
+                    if stats_dir:
+                        path = os.path.join(stats_dir, replay_id + ".stats.json")
+                        if os.path.isfile(path):
+                            self.stats_replay_id[m["id"]] = replay_id
 
     def counts(self, m):
         """Whether a match is in histories, counts and bases."""
@@ -337,6 +662,12 @@ class Section:
             out["control"] = self.control[mid]
         if mid in self.chat:
             out["chat"] = self.chat[mid]
+        if mid in self.stats_replay_id:
+            path = os.path.join(
+                self.stats_dir, self.stats_replay_id[mid] + ".stats.json")
+            with open(path, encoding="utf-8") as f:
+                out["stats"] = replay_stats_doc(
+                    json.load(f), self.players_by_match.get(mid, []))
         return out
 
     def facts(self, keys):
@@ -411,7 +742,7 @@ def neobot_history(games, rows):
 
 def export(pub_conn, league_conn, out, league_exclude=(), replays=None,
            replay_site="https://ss-replay.pages.dev", now=None, control=None,
-           chat=None):
+           chat=None, stats_dir=None):
     """Write the whole site's data under `out`. Returns a summary dict."""
     started = time.monotonic()
     pub_bots = readers.bot_names(pub_conn)
@@ -419,7 +750,8 @@ def export(pub_conn, league_conn, out, league_exclude=(), replays=None,
     league = Section("league", league_conn, LEAGUE_SCOPES,
                      lambda l: any(glob_match(p, l) for p in league_exclude),
                      replays=replays, replay_site=replay_site,
-                     unfinished=False, control=control, chat=chat)
+                     unfinished=False, control=control, chat=chat,
+                     stats_dir=stats_dir)
     w = Writer(out)
 
     # ---- who is who ---------------------------------------------------------
@@ -503,12 +835,16 @@ def export(pub_conn, league_conn, out, league_exclude=(), replays=None,
 
     # ---- the matches ---------------------------------------------------------
     for section in (pub, league):
-        buckets = {}
+        bucket, docs = None, {}
         for m in section.matches:
-            buckets.setdefault(m["id"] // OWN_BUCKET, {})[str(m["id"])] = \
-                section.match_doc(m)
-        for b, docs in buckets.items():
-            w.json("m/%s/%d.json" % (section.name, b), docs)
+            current = m["id"] // OWN_BUCKET
+            if bucket is not None and current != bucket:
+                w.json("m/%s/%d.json" % (section.name, bucket), docs)
+                docs = {}
+            bucket = current
+            docs[str(m["id"])] = section.match_doc(m)
+        if docs:
+            w.json("m/%s/%d.json" % (section.name, bucket), docs)
         w.json("facts/%s.json" % section.name, section.facts(keys))
         w.json("records/%s.json" % section.name,
                records.section_records(section, keys))
@@ -608,4 +944,5 @@ def export(pub_conn, league_conn, out, league_exclude=(), replays=None,
             "neobot_games": len(pub.neobot_matches),
             "replay_links": len(league.replay),
             "control_matches": len(league.control),
-            "chat_matches": len(league.chat)}
+            "chat_matches": len(league.chat),
+            "stats_matches": len(league.stats_replay_id)}

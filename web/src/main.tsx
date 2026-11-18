@@ -12,6 +12,7 @@ import { Player } from "./pages/Player";
 import { Records } from "./pages/Records";
 import { installLinkHandler, useRoute } from "./router";
 import { PlayerSearch, useTitle } from "./ui";
+import { installTooltips } from "./tooltip";
 import "./style.css";
 
 function Page() {
@@ -121,4 +122,5 @@ function App() {
 }
 
 installLinkHandler();
+installTooltips();
 render(<App />, document.getElementById("app")!);

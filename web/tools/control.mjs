@@ -1,6 +1,7 @@
 // Base control for every league replay, worked out by ss-replay's own code
 // (web/src/control.ts, model.ts, tiles.ts), bundled with esbuild and only
 // read: the site's chart and Held column are then the replay's own numbers.
+// cloak.mjs also measures replay-only cloaked advances and totals on that geometry.
 //   node tools/control.mjs <ss-replay data dir> <ss-replay web/src> <out dir>
 //
 // THE RULE is control.ts's: once a second, each floor tile of the base being
@@ -24,6 +25,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { docRounds } from "./control-rounds.mjs";
+import { cloakStats } from "./cloak.mjs";
 
 const STEP = 100;          // ticks a sample: control.ts computeSeries' step, one a second
 
@@ -48,14 +50,16 @@ const { Model, Tiles, BaseControl } = await import(pathToFileURL(join(tmp, "ssre
 rmSync(tmp, { recursive: true });
 // ss-replay's code and ours: a change to any of it computes it all again
 const codeHash = createHash("sha1").update(code).update(readFileSync(new URL(import.meta.url)))
-  .update(readFileSync(new URL("./control-rounds.mjs", import.meta.url))).digest("hex");
+  .update(readFileSync(new URL("./control-rounds.mjs", import.meta.url)))
+  .update(readFileSync(new URL("./cloak.mjs", import.meta.url))).digest("hex");
 
 function compute(doc, lvl) {
   const control = new BaseControl(lvl, new Tiles(lvl), [0, 1]);
   if (!control.bases.length) throw new Error("no bases found on the map");
   const model = new Model(doc);
   const endTick = doc.source.endTick;
-  return docRounds(doc).map((r) => {
+  const rounds = docRounds(doc);
+  const series = rounds.map((r) => {
     const end = r.end ?? endTick;
     // dash.ts setControlSeries: the samples from ceil(start) to end, as the
     // series holds them (a Float32Array), averaged where a base was played
@@ -73,6 +77,9 @@ function compute(doc, lvl) {
     return { round: r.round, attempt: r.attempt, seq: r.seq, base: r.base, start: r.start, end,
       held: n ? sum / n : null, pct: n ? Math.round((sum / n) * 100) : null, shares };
   });
+  const { runs: cloak, totals: cloakTotals } = cloakStats(doc, model, control, rounds);
+  return { rounds: series, cloak, cloakTotals,
+    cloakPlayers: model.shipPlayers().map((p) => model.name(p)) };
 }
 
 mkdirSync(out, { recursive: true });
@@ -94,8 +101,8 @@ for (const e of index) {
       } catch { /* unreadable: compute it again */ }
     }
     const doc = JSON.parse(gunzipSync(readFileSync(rp)).toString("utf8"));
-    const rounds = compute(doc, new Uint8Array(readFileSync(mp)));
-    writeFileSync(file + ".tmp", JSON.stringify({ key, id: e.id, match: e.match.id, step: STEP, rounds }));
+    const result = compute(doc, new Uint8Array(readFileSync(mp)));
+    writeFileSync(file + ".tmp", JSON.stringify({ key, id: e.id, match: e.match.id, step: STEP, ...result }));
     renameSync(file + ".tmp", file);
     tally.computed++;
   } catch (err) {

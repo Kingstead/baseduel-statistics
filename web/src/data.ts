@@ -258,15 +258,77 @@ export interface ChatDoc {
   lines: ChatLine[];
 }
 
+export interface ReplayKill {
+  t: number;
+  killer: string;
+  killed: string;
+  weapon: string;
+  teamKill: boolean;
+  killerFreq: number;
+  killedFreq: number;
+}
+export interface ReplayPlayer {
+  player: number;
+  name: string;
+  shots: Record<string, number>;
+}
+/** Recording ticks; start includes a short lead-in before the event. */
+export interface ReplayMoment {
+  start: number;
+  end: number;
+  label?: string;
+}
+export interface ReplayHighlight {
+  group: "Kills" | "Deaths" | "Movement";
+  label: string;
+  value: string;
+  names: string[];
+  more: number;
+  description?: string;
+  ranking: {
+    name: string;
+    value: string | null;
+    run?: { start: number; end: number; seconds: number };
+    moments?: ReplayMoment[];
+  }[];
+}
+/** Replay stats embedded by the exporter; the page never fetches ss-replay. */
+export interface ReplayStats {
+  end: number;
+  players: ReplayPlayer[];
+  kills: ReplayKill[];
+  breakdowns: Record<string, PlayerKillBreakdown>;
+  highlights: ReplayHighlight[];
+  streakEnds?: Record<string, ReplayMoment[]>;
+}
+export interface PlayerKillBreakdown {
+  killed: Versus[];
+  killedBy: Versus[];
+  teamKilled: Versus[];
+  teamKilledBy: Versus[];
+  kills: number;
+  deaths: number;
+  weaponsOut: Record<string, number>;
+  weaponsIn: Record<string, number>;
+}
+export interface Versus {
+  name: string;
+  freq: number;
+  n: number;
+  weapons: Record<string, number>;
+}
+
 export interface MatchDoc {
   match: MatchRow;
   players: Table;
   rounds: Table;
   round_players: Table;
   /** League matches with a replay only. */
-  control?: { rounds: ControlRound[] };
+  control?: { rounds: ControlRound[]; highlights?: ReplayHighlight[] };
   /** League matches whose replay holds any chat. */
   chat?: ChatDoc;
+  /** Published league replay stats, read and prepared by the exporter. */
+  stats?: ReplayStats;
 }
 
 export interface NeobotMatchRow {

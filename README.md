@@ -24,7 +24,51 @@ The two are never added together: different arenas, different settings.
   or rating over time), teammates and rivals, and every match played.
 - **Matches:** the full scoreboard the bot prints in game, the score after
   each round, a round timeline, and for league matches with a published
-  replay, a base-control chart and the match's chat, linked to the replay.
+  replay, a base-control chart, the match's chat and replay-derived player
+  breakdowns and highlights, linked to the replay. Replay stats are embedded
+  by the exporter; the page does not fetch files from ss-replay.
+  Player names open career pages; supported scoreboard stat cells open focused
+  replay breakdowns: kills, deaths, team kills, reconstructed streaks, kills by
+  recording minute, and repel/burst use (with estimated burst victims).
+  Replay details are labelled separately from the bot's scoreboard totals.
+  Damage relationships, attach relationships and available/remaining item
+  counts are not in the available replay stats; those limitations are shown
+  explicitly rather than inventing player breakdowns.
+  Matches with replays add highlights for
+  most kills/deaths in any rolling 60-second window, most enemy kills without
+  dying and most deaths without an enemy kill. Replay peaks cover the whole
+  recording, including between rounds and runs still in progress at its end.
+  Minute counts include team kills; suicides count as deaths, not kills.
+  Kill/death peak rankings link to the first occurrence of each player's
+  best result, with a five-second lead-in and player-follow enabled.
+  **Most streaks ended** keeps the bot's totals and adds links to each
+  reconstructed enemy streak of 10+ ended in the recording; replay events
+  and scoreboard totals can differ. A **Replay** badge marks highlights
+  with watchable moments, including cloaked advances.
+  With replay base geometry available, **Longest cloaked advance** measures
+  net progress toward the enemy safe along the base's four-neighbour tile
+  paths (one tile is 16 pixels), not total distance flown. Measurement starts
+  10 seconds after each round begins, with no distance or cloaked time carried
+  over from those first 10 seconds. Shooting reveals
+  of up to two seconds join the same run; visible forward movement earns no
+  distance and backtracking undoes progress. Death, ship/team changes,
+  position discontinuities (warps/attaches), leaving the base, gaps in
+  position data and round boundaries reset the run. Only matched rounds
+  count. This is a packet-derived estimate, not a bot stat; the ranking links
+  to each player's best run and shows its observed cloaked time.
+  **Total cloaked time & progress** ranks players by the sum of each separate
+  cloak run's best net advance and shows their total observed cloaked time
+  alongside it. Stationary and retreating cloaked time counts too; visible
+  shooting gaps do not. Backtracking within a run does not farm progress.
+  The same round, warmup and position-continuity restrictions apply.
+  Each highlight opens a complete highest-to-lowest ranking for the match;
+  player names still link to career pages, and untracked values stay untracked.
+  Highlights are grouped by score/time, kills, deaths, damage, teamwork, movement and
+  items, with an arrow marking each clickable card. Uninterrupted-minute
+  highlights count kills before any death and deaths before any kill within
+  rolling windows of up to 60 seconds; shorter runs qualify and team kills
+  count as kills. Scoreboard headers sort within each team, reversing on a
+  second click; team totals stay at the bottom and untracked values sort last.
 - **Leaderboards:** every board the bots offer in game, plus a time range and
   a minimum number of matches.
 - **Records:** most kills and damage in a match, longest streaks, winning
@@ -83,7 +127,8 @@ mkdir -p .snap
 python3 -m exporter snapshot /path/to/pubduel.db .snap/pubduel.db
 python3 -m exporter snapshot /path/to/baseduel.db .snap/baseduel.db
 python3 -m exporter export --pub .snap/pubduel.db --league .snap/baseduel.db \
-    --out web/public/data
+    --out web/public/data [--replays /path/to/ss-replay/web/public/data/index.json \
+    --stats /path/to/ss-replay/web/public/data]
 cd web && npm ci && npm run dev
 ```
 

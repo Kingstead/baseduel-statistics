@@ -22,8 +22,8 @@
 #   BDSTATS_PUB_DB      ~/PyCore/pubduel.db
 #   BDSTATS_LEAGUE_DB   ~/PyCore/baseduel.db
 #   BDSTATS_REPLAYS     ~/ss-replay/web/public/data/index.json (links to the
-#                       league's published replays, and web/tools/chat.mjs
-#                       reads their chat into .snap/chat; skipped if missing)
+#                       league's published replays; base control, chat and
+#                       replay stats are read from this folder)
 #   BDSTATS_SSREPLAY    ~/ss-replay (its web/src: the base control code that
 #                       web/tools/control.mjs runs over the replays beside the
 #                       index, read-only, into .snap/control)
@@ -51,7 +51,18 @@ ssreplay="${BDSTATS_SSREPLAY:-$HOME/ss-replay}"
 started=$(date +%s)
 
 marker=".deployed-$branch"
-replays_seen() { stat -L -c '%n %s %.9Y' "$replays" 2>/dev/null || echo "$replays none"; }
+replays_seen() {
+  local index stats data
+  index=$(stat -L -c '%n %s %.9Y' "$replays" 2>/dev/null || echo "$replays none")
+  data="$(dirname "$replays")"
+  if [ -d "$data" ]; then
+    stats=$(find "$data" -maxdepth 1 -type f -name '*.stats.json' \
+      -printf '%f %s %.9T@\n' | LC_ALL=C sort | cksum | awk '{print $1 ":" $2}')
+  else
+    stats=none
+  fi
+  printf '%s %s\n' "$index" "$stats"
+}
 newer() {
   find web/public/data web/src web/index.html web/public/_headers web/package.json \
     web/tools/control.mjs web/tools/control-rounds.mjs web/tools/chat.mjs tools/deploy.sh exporter \
@@ -69,8 +80,8 @@ if [ "${TRIGGER:-}" = league ]; then
 fi
 
 # Most runs fall between matches, when nothing has been written: those stop
-# here, having looked at five files' sizes and times, the databases, their
-# write-ahead logs and the replay index. Any write by a bot makes a full run.
+# here, having looked at the databases, their write-ahead logs, replay index
+# and stats-file metadata. Any write by a bot makes a full run.
 seen=$(for f in "$pub_db" "$pub_db-wal" "$league_db" "$league_db-wal"; do
   stat -L -c '%n %s %.9Y' "$f" 2>/dev/null || echo "$f none"; done; replays_seen)
 if [ -f "$marker" ] && [ "$seen" = "$(cat .snap/seen 2>/dev/null)" ] && [ -z "$(newer)" ]; then
@@ -86,18 +97,19 @@ args=(--pub .snap/pubduel.db --league .snap/baseduel.db --out web/public/data
 control=""
 chat=""
 if [ -f "$replays" ]; then
-  args+=(--replays "$replays")
+  replay_data="$(dirname "$replays")"
+  args+=(--replays "$replays" --stats "$replay_data")
   # Base control of each league replay: only new or changed ones are worked
   # out. If ss-replay's code will not run, the files from the last run stay,
   # so no chart disappears from the site over it.
-  if ! control=$(cd web && node tools/control.mjs "$(dirname "$replays")" "$ssreplay/web/src" ../.snap/control); then
+  if ! control=$(cd web && node tools/control.mjs "$replay_data" "$ssreplay/web/src" ../.snap/control); then
     echo "refresh: base control FAILED, the last run's kept" >&2
     control=""
   fi
   if [ -d .snap/control ]; then args+=(--control .snap/control); fi
   # The chat of each league replay, read only when the replay is new or
   # changed; the same rule if it fails: the last run's files stay.
-  if ! chat=$(cd web && node tools/chat.mjs "$(dirname "$replays")" ../.snap/chat); then
+  if ! chat=$(cd web && node tools/chat.mjs "$replay_data" ../.snap/chat); then
     echo "refresh: chat FAILED, the last run's kept" >&2
     chat=""
   fi

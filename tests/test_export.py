@@ -311,6 +311,64 @@ class TestMatches(ExportCase):
         # the match page only: the lists and leaderboards' facts stay small
         self.assertNotIn('"shares"', json.dumps(self.load("facts/league.json")))
 
+    def test_cloak_highlight_uses_published_matched_rounds_and_roster(self):
+        recs = ("bd202611011900", "bd202611012000", "bd202611012100")
+        a, b, c = (self.league.match(mode="match", arena="bdl", recording=r)
+                   for r in recs)
+        for mid in (a, b, c):
+            for name in ("Ann", "Bob", "Carl", "Dan"):
+                self.league.player(mid, name, 0, True)
+            self.league.round(mid, 1, 0)
+        replay_control = {
+            "rounds": [{"seq": 1, "pct": 50, "shares": [0.5]}],
+            "cloakPlayers": ["ANN", "bob", "Carl", "Spectator"],
+            "cloak": [
+                {"seq": 1, "name": "ann", "tiles": 20, "start": 100,
+                 "end": 500, "seconds": 3.5},
+                {"seq": 1, "name": "Bob", "tiles": 20, "start": 200,
+                 "end": 600, "seconds": 4},
+                {"seq": 9, "name": "Ann", "tiles": 1000, "start": 700,
+                 "end": 900, "seconds": 2},
+                {"seq": 1, "name": "Spectator", "tiles": 2000, "start": 100,
+                 "end": 800, "seconds": 7},
+            ],
+            "cloakTotals": [
+                {"seq": 1, "name": "ann", "tiles": 25, "seconds": 60.1},
+                {"seq": 1, "name": "ANN", "tiles": 15, "seconds": 0.9},
+                {"seq": 1, "name": "Bob", "tiles": 30, "seconds": 20},
+                {"seq": 9, "name": "Ann", "tiles": 1000, "seconds": 1000},
+                {"seq": 1, "name": "Spectator", "tiles": 2000, "seconds": 2000},
+            ],
+        }
+        self.run_export(
+            replays={"bdl-" + r: "bdl-" + r for r in recs[:2]},
+            control={"bdl-" + recs[0]: replay_control,
+                     "bdl-" + recs[2]: replay_control})
+        shard = self.load("m/league/0.json")
+        highlight, totals = shard[str(a)]["control"]["highlights"]
+        self.assertEqual((highlight["group"], highlight["value"],
+                          highlight["names"]), ("Movement", "20 tiles",
+                                                ["Ann", "Bob"]))
+        self.assertEqual(highlight["ranking"], [
+            {"name": "Ann", "value": "20 tiles",
+             "run": {"start": 100, "end": 500, "seconds": 3.5}},
+            {"name": "Bob", "value": "20 tiles",
+             "run": {"start": 200, "end": 600, "seconds": 4}},
+            {"name": "Carl", "value": "0 tiles"},
+            {"name": "Dan", "value": None},
+        ])
+        self.assertEqual((totals["label"], totals["value"], totals["names"]),
+                         ("Total cloaked time & progress", "40 tiles", ["Ann"]))
+        self.assertEqual(totals["ranking"], [
+            {"name": "Ann", "value": "40 tiles / 1:01 cloaked"},
+            {"name": "Bob", "value": "30 tiles / 0:20 cloaked"},
+            {"name": "Carl", "value": "0 tiles / 0:00 cloaked"},
+            {"name": "Dan", "value": None},
+        ])
+        for mid in (b, c):
+            self.assertNotIn("control", shard[str(mid)])
+        self.assertNotIn("cloak", json.dumps(self.load("facts/league.json")))
+
     def test_chat_only_from_a_published_replay_with_its_rounds(self):
         recs = ("bd202611011900", "bd202611012000", "bd202611012100",
                 "bd202611012200")
@@ -348,6 +406,138 @@ class TestMatches(ExportCase):
         self.assertEqual(got["chat_matches"], 1)
         # the match page only
         self.assertNotIn("no sender", json.dumps(self.load("facts/league.json")))
+
+    def test_stats_are_embedded_only_for_published_replays(self):
+        recs = ("bd202611151432", "bd202611151500", "bd202611151530")
+        a, b, c = (self.league.match(mode="match", arena="bdl", recording=r)
+                   for r in recs)
+        for mid in (a, b, c):
+            self.league.player(mid, "Ann", 0, True)
+            self.league.player(mid, "Bob", 1, False)
+            self.league.player(mid, "Cy", 1, False)
+        stats_dir = os.path.join(self.tmp, "replays")
+        os.makedirs(stats_dir)
+        raw = {
+            "source": {"endTick": 10000},
+            "players": [
+                {"player": 1, "name": "ann", "shots": {"burst": 2}},
+                {"player": 2, "name": "Bob", "shots": {"repel": 3}},
+                {"player": 3, "name": "Cy", "shots": {}},
+            ],
+            "killLog": [
+                {"t": 100, "killer": 1, "killed": 2, "weapon": "bullet",
+                 "teamKill": False, "killerFreq": 0, "killedFreq": 1},
+                {"t": 200, "killer": 1, "killed": 2, "weapon": "burst",
+                 "teamKill": False, "killerFreq": 0, "killedFreq": 1},
+                {"t": 300, "killer": 2, "killed": 1, "weapon": None,
+                 "teamKill": False, "killerFreq": 1, "killedFreq": 0},
+                {"t": 400, "killer": 3, "killed": 1, "weapon": "bomb",
+                 "teamKill": True, "killerFreq": 1, "killedFreq": 0},
+            ],
+        }
+        with open(os.path.join(stats_dir, "bdl-%s.stats.json" % recs[0]), "w") as f:
+            json.dump(raw, f)
+        # A stats file for an unpublished replay must not become site data.
+        with open(os.path.join(stats_dir, "bdl-%s.stats.json" % recs[2]), "w") as f:
+            json.dump(raw, f)
+
+        got = self.run_export(
+            replays={"bdl-" + r: "bdl-" + r for r in recs[:2]},
+            stats_dir=stats_dir)
+        shard = self.load("m/league/0.json")
+        stats = shard[str(a)]["stats"]
+        self.assertEqual(stats["end"], 10000)
+        self.assertEqual(stats["players"][0],
+                         {"player": 1, "name": "ann", "shots": {"burst": 2}})
+        self.assertEqual(stats["kills"][0], {
+            "t": 100, "killer": "ann", "killed": "Bob", "weapon": "bullet",
+            "teamKill": False, "killerFreq": 0, "killedFreq": 1})
+        self.assertEqual(stats["kills"][2]["weapon"], "unknown")
+        self.assertEqual((stats["breakdowns"]["ann"]["kills"],
+                          stats["breakdowns"]["ann"]["deaths"]), (2, 1))
+        self.assertEqual(stats["breakdowns"]["ann"]["killed"], [{
+            "name": "Bob", "freq": 1, "n": 2,
+            "weapons": {"bullet": 1, "burst": 1}}])
+        self.assertEqual(stats["breakdowns"]["ann"]["teamKilledBy"][0]["name"],
+                         "Cy")
+        self.assertEqual(
+            [(h["label"], h["value"], h["names"]) for h in stats["highlights"]],
+            [("Most kills in a minute", "2", ["Ann"]),
+             ("Most enemy kills before dying", "2", ["Ann"]),
+             ("Most deaths in a minute", "2", ["Ann", "Bob"]),
+             ("Most deaths before a kill", "2", ["Ann", "Bob"]),
+             ("Most kills in a minute without dying", "2", ["Ann"]),
+             ("Most deaths in a minute without killing", "2", ["Ann", "Bob"])])
+        self.assertNotIn("stats", shard[str(b)])
+        self.assertNotIn("stats", shard[str(c)])
+        self.assertEqual(got["stats_matches"], 1)
+
+    def test_replay_highlights_use_half_open_rolling_minute_windows(self):
+        kills = [
+            {"t": 5900, "killer": "Ann", "killed": "Bob"},
+            {"t": 6100, "killer": "Ann", "killed": "Cy"},
+            {"t": 11899, "killer": "Ann", "killed": "Dee"},
+            {"t": 11900, "killer": "Ann", "killed": "Eve"},
+        ]
+        for kill in kills:
+            kill["teamKill"] = False
+        highlights = ex.replay_highlights(kills, [{"player_name": "Ann"}])
+        values = {h["label"]: h["value"] for h in highlights}
+        # At 11900, the 5900 event is exactly 60 seconds old and is outside
+        # the half-open window; the other three still qualify together.
+        self.assertEqual(values["Most kills in a minute"], "3")
+        self.assertEqual(values["Most kills in a minute without dying"], "3")
+        self.assertEqual(values["Most enemy kills before dying"], "4")
+        minute = next(h for h in highlights if h["label"] == "Most kills in a minute")
+        self.assertEqual(minute["ranking"][0]["moments"],
+                         [{"start": 5400, "end": 11899}])
+
+    def test_replay_moments_preserve_death_and_team_kill_boundaries(self):
+        events = [
+            (100, "Ann", "Bob", False), (200, "Bob", "Ann", False),
+            (300, "Cy", "ANN", True), (400, "Ann", "Ann", True),
+            (500, "ANN", "Cy", True), (600, "Bob", "Ann", False),
+            (700, "Ann", "Bob", False), (800, "Bob", "Ann", False),
+        ]
+        kills = [{"t": t + 10000, "killer": killer, "killed": killed,
+                  "teamKill": team_kill}
+                 for t, killer, killed, team_kill in events]
+        hs = {h["label"]: h for h in
+              ex.replay_highlights(list(reversed(kills)), [
+                  {"player_name": "Ann"}, {"player_name": "Nobody"}])}
+        expected = {
+            "Most kills in a minute": ("3", 9600, 10700),
+            "Most deaths in a minute": ("5", 9700, 10800),
+            "Most enemy kills before dying": ("1", 9600, 10100),
+            "Most deaths before a kill": ("4", 9700, 10600),
+            "Most kills in a minute without dying": ("1", 9600, 10100),
+            "Most deaths in a minute without killing": ("3", 9700, 10400),
+        }
+        for label, (value, start, end) in expected.items():
+            row, zero = hs[label]["ranking"]
+            self.assertEqual(row["value"], value, label)
+            self.assertEqual(row["moments"], [{"start": start, "end": end}], label)
+            self.assertNotIn("moments", zero)
+        early = ex.replay_highlights([
+            {"t": 0, "killer": "Ann", "killed": "Bob", "teamKill": False}],
+            [{"player_name": "Ann"}])
+        self.assertEqual(early[0]["ranking"][0]["moments"],
+                         [{"start": 0, "end": 0}])
+
+    def test_streak_end_moments_include_each_enemy_ending_not_team_kills(self):
+        kills = []
+        for start, killer, killed, team_kill in [
+                (0, "ANN", "Bob", False), (2000, "Ann", "BOB", True),
+                (4000, "Bob", "Bob", True), (6000, "ann", "Bob", False)]:
+            kills.extend({"t": start + i * 100, "killer": "Bob",
+                          "killed": "Victim", "teamKill": False}
+                         for i in range(10))
+            kills.append({"t": start + 1000, "killer": killer,
+                          "killed": killed, "teamKill": team_kill})
+        self.assertEqual(ex.streak_end_moments(list(reversed(kills))), {"ann": [
+            {"start": 500, "end": 1000, "label": "Ended Bob's 10-kill streak"},
+            {"start": 6500, "end": 7000, "label": "Ended Bob's 10-kill streak"},
+        ]})
 
     def test_play_time_leaves_out_holds_and_gaps(self):
         m = self.pub.match(length=1000.0, held_seconds=100.0,

@@ -2,7 +2,7 @@
 python3 -m exporter snapshot SRC DST [--immutable]
 python3 -m exporter export --pub PUBDB --league LEAGUEDB --out DIR
                            [--replays INDEX] [--replay-site URL]
-                           [--control DIR] [--chat DIR]
+                           [--control DIR] [--chat DIR] [--stats DIR]
                            [--league-exclude 'Zero-EG-*']
 python3 -m exporter matches DB
 
@@ -81,6 +81,7 @@ def main(argv=None):
     e.add_argument("--replay-site", default="https://ss-replay.pages.dev")
     e.add_argument("--control", help="web/tools/control.mjs's output folder")
     e.add_argument("--chat", help="web/tools/chat.mjs's output folder")
+    e.add_argument("--stats", help="ss-replay data folder with <id>.stats.json files")
     e.add_argument("--league-exclude", default="Zero-EG-*",
                    help="BASEDUEL_STATS_EXCLUDE's patterns, comma-separated")
     m = sub.add_parser("matches", help="the last match number and the count")
@@ -103,7 +104,8 @@ def main(argv=None):
                      replay_site=args.replay_site,
                      control=load_control(args.control) if args.control
                      else None,
-                     chat=load_chat(args.chat) if args.chat else None)
+                     chat=load_chat(args.chat) if args.chat else None,
+                     stats_dir=args.stats)
     finally:
         pub.close()
         league.close()

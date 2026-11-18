@@ -21,8 +21,10 @@ and `CLOUDFLARE_ACCOUNT_ID` for the Pages project.
 ## 3. Paths
 
 `tools/refresh.sh` reads the databases from `~/PyCore` and replays from
-`~/ss-replay` by default. Override with `BDSTATS_PUB_DB`, `BDSTATS_LEAGUE_DB`,
-`BDSTATS_REPLAYS`, `BDSTATS_SSREPLAY` and `BDSTATS_LEAGUE_EXCLUDE`.
+`~/ss-replay` by default. It reads matching `<replay id>.stats.json` files
+from the same data folder as the replay index. Override with
+`BDSTATS_PUB_DB`, `BDSTATS_LEAGUE_DB`, `BDSTATS_REPLAYS`, `BDSTATS_SSREPLAY`
+and `BDSTATS_LEAGUE_EXCLUDE`.
 
 ## 4. One run by hand
 

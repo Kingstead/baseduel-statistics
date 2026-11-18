@@ -96,7 +96,8 @@ The export refuses past 15,000 files or 20 MiB a file (Pages limits).
 python3 -m exporter snapshot SRC DST [--immutable]
 python3 -m exporter export --pub .snap/pubduel.db --league .snap/baseduel.db \
     --out web/public/data [--replays <index.json>] [--control .snap/control] \
-    [--chat .snap/chat] [--league-exclude 'pattern']
+    [--chat .snap/chat] [--stats <ss-replay data dir>] \
+    [--league-exclude 'pattern']
 tools/check.sh                       # everything
 cd web && node_modules/.bin/vite     # dev server
 tools/deploy.sh preview              # needs .cloudflare.env
